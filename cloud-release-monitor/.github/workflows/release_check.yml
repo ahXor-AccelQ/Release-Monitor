@@ -1,0 +1,73 @@
+name: Daily Enterprise Release Tracker
+
+on:
+  schedule:
+    - cron: "30 2 * * *"  # Runs daily at 02:30 UTC (08:00 IST)
+  workflow_dispatch:
+
+jobs:
+  check_releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run release tracker
+        id: tracker
+        run: |
+          python release_tracker.py
+
+      - name: Commit updated state (if any)
+        run: |
+          git config user.name "Release Bot"
+          git config user.email "bot@github.com"
+          git add last_releases.json || true
+          git commit -m "Update release snapshot" || echo "No changes to commit"
+          git push || echo "Push failed or not configured"
+        continue-on-error: true
+
+      - name: Send email via SMTP (if configured)
+        id: sendmail
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        run: |
+          python send_email.py
+        continue-on-error: true
+
+      - name: Create GitHub issue if SMTP not configured or email failed
+        if: steps.sendmail.outcome != 'success'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('updates.json')) {
+              console.log('No updates.json present. Nothing to create.');
+              return;
+            }
+            const updates = JSON.parse(fs.readFileSync('updates.json','utf8'));
+            let body = "The release monitor detected the following updates:\\n\\n";
+            for (const k of Object.keys(updates)) {
+              const v = updates[k];
+              body += `- **${k}**: ${v.old || 'N/A'} → ${v.new}\\n  ${v.url}\\n\\n`;
+            }
+            const title = "Release Monitor: New Platform Releases Detected";
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body
+            });
+            core.setOutput("issue_url", issue.data.html_url);
